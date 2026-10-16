@@ -34,9 +34,9 @@ def umbral_suave(v, t):
 
 
 def perdida_logistica(z, y):
-    """J_log evaluada desde z, sin calcular log(p)."""
-    #  l_i = log(1 + e^z_i) - y_i z_i.
-    return float(np.mean(np.log1p(np.exp(z)) - y * z))
+    """J_log desde z, sin calcular log(p): l_i = log(1 + e^z_i) - y_i z_i."""
+    z = np.asarray(z, dtype=float)
+    return float(np.mean(log1pexp(z) - y * z))
 
 
 def _aumentar(X):
