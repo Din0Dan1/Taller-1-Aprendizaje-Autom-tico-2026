@@ -34,13 +34,16 @@ def umbral_suave(v, t):
 
 
 def perdida_logistica(z, y):
-    """J_log desde z, sin calcular log(p): l_i = log(1 + e^z_i) - y_i z_i."""
+    """J_log evaluada desde z, sin calcular log(p)."""
+    #  l_i = log(1 + e^z_i) - y_i z_i, con log(1 + e^z) calculado de forma estable.
     z = np.asarray(z, dtype=float)
     return float(np.mean(log1pexp(z) - y * z))
 
 
-def _aumentar(X):
-    """X~ = [1_N  X]."""
+def _aumentar(X, fit_intercept=True):
+    """X~ = [1_N  X] si hay intercepto; X sin cambios si b = 0 es conocido."""
+    if not fit_intercept:
+        return X
     return np.column_stack([np.ones(X.shape[0]), X])
 
 
@@ -80,9 +83,21 @@ def _no_negativo(nombre, valor):
 class _ModeloLineal:
     """Guarda w, b y ofrece predicción, guardado y carga."""
 
-    def __init__(self):
+    def __init__(self, fit_intercept=True):
+        self.fit_intercept = fit_intercept
         self.w_ = None
         self.b_ = None
+
+    @property
+    def _i0(self):
+        """Posición del primer peso en theta: 1 si theta = (b, w), 0 si theta = w."""
+        return 1 if self.fit_intercept else 0
+
+    def _separar(self, theta):
+        """theta -> (b, w). Sin intercepto, b = 0 exacto."""
+        if self.fit_intercept:
+            return float(theta[0]), theta[1:]
+        return 0.0, theta.copy()
 
     def _comprobar_ajustado(self):
         if self.w_ is None:
@@ -137,47 +152,55 @@ class _RegresionMixin:
 class OLS(_RegresionMixin, _ModeloLineal):
     """Mínimos cuadrados con intercepto, mediante lstsq (norma mínima si no es única)."""
 
+    def __init__(self, fit_intercept=True):
+        super().__init__(fit_intercept=fit_intercept)
+
     def fit(self, X, y):
         X, y = _validar_Xy(X, y)
-        Xa = _aumentar(X)
+        Xa = _aumentar(X, self.fit_intercept)
         theta, _, self.rango_, _ = np.linalg.lstsq(Xa, y, rcond=None)
-        self.b_, self.w_ = float(theta[0]), theta[1:]
+        self.b_, self.w_ = self._separar(theta)
         self.solucion_unica_ = self.rango_ == Xa.shape[1]
         return self
 
     def residuo_normal(self, X, y):
         """||X~^T (y - X~ theta)|| / N: debe ser ~0 en el óptimo."""
         X, y = _validar_Xy(X, y)
-        return float(np.linalg.norm(_aumentar(X).T @ (y - self.decision(X))) / X.shape[0])
+        Xa = _aumentar(X, self.fit_intercept)
+        return float(np.linalg.norm(Xa.T @ (y - self.decision(X))) / X.shape[0])
 
 
 class Ridge(_RegresionMixin, _ModeloLineal):
     """Ridge con intercepto no penalizado: (X~^T X~/N + lambda2 P) theta = X~^T y / N."""
 
-    def __init__(self, lambda2=1.0):
-        super().__init__()
+    def __init__(self, lambda2=1.0, fit_intercept=True):
+        super().__init__(fit_intercept=fit_intercept)
         self.lambda2 = lambda2
+
+    def _matriz_P(self, D):
+        # P = diag(0, 1, …, 1) con intercepto; P = I si b = 0 es conocido.
+        return np.diag(np.r_[0.0, np.ones(D)]) if self.fit_intercept else np.eye(D)
 
     def fit(self, X, y):
         _no_negativo("lambda2", self.lambda2)
         X, y = _validar_Xy(X, y)
         N, D = X.shape
-        Xa = _aumentar(X)
+        Xa = _aumentar(X, self.fit_intercept)
         # P = diag(0, 1, …, 1): el cero deja el intercepto sin penalizar.
-        P = np.diag(np.r_[0.0, np.ones(D)])
+        P = self._matriz_P(D)
         # Matriz de las ecuaciones normales de Ridge con la convención (4) (X̃ᵀX̃/N + λ₂P)θ = X̃ᵀy/N. El 1/N viene de J_reg.
         A = Xa.T @ Xa / N + self.lambda2 * P
         c = Xa.T @ y / N
         theta = np.linalg.solve(A, c)
-        self.b_, self.w_ = float(theta[0]), theta[1:]
+        self.b_, self.w_ = self._separar(theta)
         return self
 
     def residuo_normal(self, X, y):
         X, y = _validar_Xy(X, y)
         N, D = X.shape
-        Xa = _aumentar(X)
-        theta = np.r_[self.b_, self.w_]
-        P = np.diag(np.r_[0.0, np.ones(D)])
+        Xa = _aumentar(X, self.fit_intercept)
+        theta = np.r_[self.b_, self.w_] if self.fit_intercept else self.w_
+        P = self._matriz_P(D)
         res = (Xa.T @ Xa / N + self.lambda2 * P) @ theta - Xa.T @ y / N
         return float(np.linalg.norm(res))
 
@@ -188,8 +211,9 @@ class Ridge(_RegresionMixin, _ModeloLineal):
 class _Iterativo(_ModeloLineal):
     """Bucle común: historial, criterio de parada, motivo de terminación y arranque en caliente."""
 
-    def __init__(self, lambda2=0.0, eta=None, tol=1e-8, max_iter=10_000, warm_start=False):
-        super().__init__()
+    def __init__(self, lambda2=0.0, eta=None, tol=1e-8, max_iter=10_000, warm_start=False,
+                 fit_intercept=True):
+        super().__init__(fit_intercept=fit_intercept)
         self.lambda2 = lambda2
         self.eta = eta
         self.tol = tol
@@ -227,8 +251,8 @@ class _Iterativo(_ModeloLineal):
     def _ajustar(self, Xa, y):
         self._validar_hiper()
         D1 = Xa.shape[1]
-        if self.warm_start and self.w_ is not None and self.w_.shape[0] == D1 - 1:
-            theta = np.r_[self.b_, self.w_]
+        if self.warm_start and self.w_ is not None and self.w_.shape[0] == D1 - self._i0:
+            theta = np.r_[self.b_, self.w_] if self.fit_intercept else self.w_.copy()
         else:
             theta = np.zeros(D1)
 
@@ -255,7 +279,7 @@ class _Iterativo(_ModeloLineal):
                 break
 
         self.n_iter_ = k
-        self.b_, self.w_ = float(theta[0]), theta[1:]
+        self.b_, self.w_ = self._separar(theta)
         return self
 
 
@@ -264,14 +288,14 @@ class RegresionLinealGD(_RegresionMixin, _Iterativo):
 
     def _objetivo_theta(self, Xa, y, theta):
         r = Xa @ theta - y
-        return 0.5 * np.mean(r ** 2) + 0.5 * self.lambda2 * np.sum(theta[1:] ** 2)
+        return 0.5 * np.mean(r ** 2) + 0.5 * self.lambda2 * np.sum(theta[self._i0:] ** 2)
 
     def _gradiente_suave(self, Xa, y, theta):
         N = Xa.shape[0]
         # Gradiente de 1/(2N)||X~ theta - y||^2 respecto a theta.
         grad = Xa.T @ (Xa @ theta - y) / N
         # Derivada de (lambda2/2)||w||^2; el intercepto no se penaliza.
-        grad[1:] += self.lambda2 * theta[1:]
+        grad[self._i0:] += self.lambda2 * theta[self._i0:]
         return grad
 
     def _constante_lipschitz(self, Xa):
@@ -280,25 +304,26 @@ class RegresionLinealGD(_RegresionMixin, _Iterativo):
 
     def fit(self, X, y):
         X, y = _validar_Xy(X, y)
-        return self._ajustar(_aumentar(X), y)
+        return self._ajustar(_aumentar(X, self.fit_intercept), y)
 
 
 class LassoProximal(RegresionLinealGD):
     """Lasso (con L2 opcional) por gradiente proximal (ISTA); b no se penaliza."""
 
     def __init__(self, lambda1=1.0, lambda2=0.0, eta=None, tol=1e-8, max_iter=10_000,
-                 warm_start=False):
+                 warm_start=False, fit_intercept=True):
         super().__init__(lambda2=lambda2, eta=eta, tol=tol, max_iter=max_iter,
-                         warm_start=warm_start)
+                         warm_start=warm_start, fit_intercept=fit_intercept)
         self.lambda1 = lambda1
 
     def _objetivo_theta(self, Xa, y, theta):
-        return super()._objetivo_theta(Xa, y, theta) + self.lambda1 * np.sum(np.abs(theta[1:]))
+        return super()._objetivo_theta(Xa, y, theta) + self.lambda1 * np.sum(np.abs(theta[self._i0:]))
 
     def _paso(self, theta, grad, eta):
         theta_nuevo = theta - eta * grad
         # El operador proximal de eta*lambda1*||w||_1; b no pasa por él.
-        theta_nuevo[1:] = umbral_suave(theta_nuevo[1:], eta * self.lambda1)
+        i0 = self._i0
+        theta_nuevo[i0:] = umbral_suave(theta_nuevo[i0:], eta * self.lambda1)
         return theta_nuevo
 
     def _residuo_parada(self, theta, theta_nuevo, grad, eta):
@@ -315,7 +340,7 @@ class LassoProximal(RegresionLinealGD):
         viol = np.zeros_like(self.w_)
         viol[activo] = np.abs(c[activo] - self.lambda1 * np.sign(self.w_[activo]))
         viol[~activo] = np.maximum(np.abs(c[~activo]) - self.lambda1, 0.0)
-        viol_b = abs(np.mean(r))
+        viol_b = abs(np.mean(r)) if self.fit_intercept else 0.0
         return float(max(viol.max(initial=0.0), viol_b))
 
 
@@ -323,14 +348,15 @@ class LogisticaGD(_Iterativo):
     """Regresión logística por descenso por gradiente, con opción L2."""
 
     def _objetivo_theta(self, Xa, y, theta):
-        return perdida_logistica(Xa @ theta, y) + 0.5 * self.lambda2 * np.sum(theta[1:] ** 2)
+        return (perdida_logistica(Xa @ theta, y)
+                + 0.5 * self.lambda2 * np.sum(theta[self._i0:] ** 2))
 
     def _gradiente_suave(self, Xa, y, theta):
         N = Xa.shape[0]
         p = sigmoide(Xa @ theta)
         # dl_i/dz_i, obtenido en el Problema 3a).
         grad = Xa.T @ (p - y) / N
-        grad[1:] += self.lambda2 * theta[1:]
+        grad[self._i0:] += self.lambda2 * theta[self._i0:]
         return grad
 
     def _constante_lipschitz(self, Xa):
@@ -340,7 +366,7 @@ class LogisticaGD(_Iterativo):
 
     def fit(self, X, y):
         X, y = _validar_Xy(X, y, binaria=True)
-        return self._ajustar(_aumentar(X), y)
+        return self._ajustar(_aumentar(X, self.fit_intercept), y)
 
     def predict_proba(self, X):
         p1 = sigmoide(self.decision(X))
