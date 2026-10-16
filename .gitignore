@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.pyc
+
+# Entornos
+.venv/
+venv/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Borradores personales (no se entregan)
+borradores/
+
+# Sistema
+.DS_Store
