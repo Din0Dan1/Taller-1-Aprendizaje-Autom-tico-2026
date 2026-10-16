@@ -6,7 +6,18 @@ En todo el problema b = 0 es conocido: se usa fit_intercept=False.
 """
 import numpy as np
 import pandas as pd
-from src.modelos import OLS, Ridge, LassoProximal
+import sys
+from pathlib import Path
+
+raiz = next((d for d in [Path.cwd(), *Path.cwd().parents] if (d / "src" / "simulacionP5.py").exists()), None)
+if raiz is None:
+    raise FileNotFoundError("No se encontró src/simulacionP5.py en esta carpeta ni en sus carpetas superiores.")
+if str(raiz) not in sys.path:
+    sys.path.insert(0, str(raiz))
+
+from src.simulacionP5 import generar_todos, semillas, registro_semillas
+from tests.experimentoP5 import (correr_experimento, ajustar_replicas,
+                                ridge_teorico, comparar_ridge_teoria, LAMBDAS)
 
 LAMBDAS = (1e-3, 1e-2, 1e-1, 1.0, 10.0)
 SIGMA2 = 1.0
